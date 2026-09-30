@@ -11,16 +11,23 @@ from urllib.parse import parse_qs, urlparse
 from .errors import DomainError, ValidationError
 from .service import DomainService
 from .storage import Database
+from .clearing.service import ClearingService
+from .clearing.api import route_clearing
 
 
 def route(service: DomainService, method: str, path: str, body: dict[str, Any] | None,
-          headers: dict[str, str] | None = None) -> tuple[int, dict[str, Any]]:
+          headers: dict[str, str] | None = None,
+          clearing_service: ClearingService | None = None) -> tuple[int, dict[str, Any]]:
     """把一个 HTTP 语义请求分派到领域服务。"""
 
     headers = headers or {}
     body = body or {}
     parsed = urlparse(path)
     actor_id = headers.get("X-Actor-Id", "")
+    if clearing_service is not None:
+        clearing_result = route_clearing(clearing_service, method, path, body, actor_id)
+        if clearing_result is not None:
+            return clearing_result
     try:
         if method == "GET" and parsed.path == "/health":
             valid, count = service.verify_audit()
@@ -59,6 +66,7 @@ class Handler(BaseHTTPRequestHandler):
     """把标准库 HTTP 请求转换为路由调用。"""
 
     service: DomainService
+    clearing_service: ClearingService | None = None
 
     def _handle(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -69,7 +77,8 @@ class Handler(BaseHTTPRequestHandler):
             self._write(400, {"error": "invalid_json", "message": "请求体必须是 UTF-8 JSON"})
             return
         status, payload = route(self.service, self.command, self.path, body,
-                                {"X-Actor-Id": self.headers.get("X-Actor-Id", "")})
+                                {"X-Actor-Id": self.headers.get("X-Actor-Id", "")},
+                                clearing_service=self.clearing_service)
         self._write(status, payload)
 
     def _write(self, status: int, payload: dict[str, Any]) -> None:
@@ -100,6 +109,7 @@ def main() -> int:
     args = parser.parse_args()
     database = Database(args.database)
     Handler.service = DomainService(database)
+    Handler.clearing_service = ClearingService(database)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         server.serve_forever()
